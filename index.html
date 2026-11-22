@@ -942,6 +942,18 @@
    <div class="sidebar-scroll">
 
     <div class="sidebar-section">
+      <div class="section-label">Fuente de datos</div>
+      <div class="field">
+        <label for="backend">Backend API</label>
+        <select id="backend">
+          <option value="arcticshift">Arctic Shift</option>
+          <option value="pullpush">PullPush</option>
+        </select>
+        <div class="switch-hint" id="backendHint">API actual. Permite hasta 1.000 publicaciones por petición.</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
       <div class="section-label">Filtros</div>
       <div class="field">
         <label>Puntaje mínimo</label>
@@ -1124,6 +1136,40 @@
 
   // ---------- Preferencia: mostrar imágenes borradas ----------
   const MOSTRAR_BORRADAS_KEY = "redditExplorerMostrarBorradas";
+  const BACKEND_KEY = "redditExplorerBackend";
+
+  function obtenerBackend() {
+    return document.getElementById("backend")?.value || localStorage.getItem(BACKEND_KEY) || "arcticshift";
+  }
+
+  function obtenerLimiteBackend(limitVal, backend) {
+    if (backend === "pullpush") {
+      if (limitVal === "auto") return 100;
+      const parsed = parseInt(limitVal, 10);
+      return (!isNaN(parsed) && parsed > 0) ? Math.min(parsed, 100) : 100;
+    }
+    return limitVal;
+  }
+
+  function construirUrlBusqueda(backend, sub, user, sort, ts, limit) {
+    if (backend === "pullpush") {
+      const params = new URLSearchParams({
+        size: String(obtenerLimiteBackend(limit, backend)),
+        sort,
+        sort_type: "created_utc"
+      });
+      if (sub) params.set("subreddit", sub);
+      if (user) params.set("author", user);
+      if (ts !== null) params.set(sort === "asc" ? "after" : "before", String(ts));
+      return `https://api.pullpush.io/topic?${params.toString()}`;
+    }
+
+    const params = new URLSearchParams({ limit: String(limit), sort });
+    if (sub) params.set("subreddit", sub);
+    if (user) params.set("author", user);
+    if (ts !== null) params.set(sort === "asc" ? "after" : "before", String(ts));
+    return `https://arctic-shift.photon-reddit.com/api/posts/search?${params.toString()}`;
+  }
 
   function cargarPreferenciaMostrarBorradas() {
     const val = localStorage.getItem(MOSTRAR_BORRADAS_KEY);
@@ -1132,8 +1178,8 @@
 
   let mostrarImagenesBorradas = cargarPreferenciaMostrarBorradas();
 
-  function marcadorId(sub, user, sort) {
-    return `${(sub || "").trim().toLowerCase()}|${(user || "").trim().toLowerCase()}|${sort}`;
+  function marcadorId(sub, user, sort, backend = obtenerBackend()) {
+    return `${(sub || "").trim().toLowerCase()}|${(user || "").trim().toLowerCase()}|${sort}|${backend}`;
   }
 
   function cargarMarcadores() {
@@ -1161,6 +1207,7 @@
     const map = cargarMarcadores();
     map[id] = {
       sub, user, sort,
+      backend: obtenerBackend(),
       minScore: document.getElementById("minScore").value,
       limit: obtenerLimiteConfigurado(),
       date: document.getElementById("date").value,
@@ -1190,6 +1237,9 @@
     document.getElementById("sub").value = bm.sub || "";
     document.getElementById("user").value = bm.user || "";
     document.getElementById("sort").value = bm.sort || "desc";
+    document.getElementById("backend").value = bm.backend || "arcticshift";
+    localStorage.setItem(BACKEND_KEY, document.getElementById("backend").value);
+    actualizarAyudaBackend();
     document.getElementById("minScore").value = bm.minScore || 0;
     document.getElementById("limit").value = bm.limit || "100";
     document.getElementById("date").value = bm.date || "";
@@ -1259,6 +1309,14 @@
     return 'images';
   }
 
+  function actualizarAyudaBackend() {
+    const backend = document.getElementById("backend")?.value || "arcticshift";
+    const hint = document.getElementById("backendHint");
+    if (hint) hint.textContent = backend === "pullpush"
+      ? "PullPush: hasta 100 publicaciones por petición."
+      : "Arctic Shift: permite hasta 1.000 publicaciones por petición.";
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("btnSearch").addEventListener("click", nuevaBusqueda);
     document.getElementById("btnReset").addEventListener("click", () => window.location.href = window.location.pathname);
@@ -1271,6 +1329,24 @@
     document.getElementById("btnCerrarMarcadores").addEventListener("click", cerrarMarcadores);
     document.getElementById("marcadoresOverlay").addEventListener("click", e => {
       if (e.target.id === "marcadoresOverlay") cerrarMarcadores();
+    });
+    const backendSelect = document.getElementById("backend");
+    backendSelect.value = localStorage.getItem(BACKEND_KEY) || "arcticshift";
+    actualizarAyudaBackend();
+    backendSelect.addEventListener("change", () => {
+      localStorage.setItem(BACKEND_KEY, backendSelect.value);
+      actualizarAyudaBackend();
+      const gallery = document.getElementById("gallery");
+      gallery.innerHTML = `
+        <div class="gallery-message">
+          <span class="msg-icon">🔌</span>
+          <div class="msg-title">Backend actualizado</div>
+          <div class="msg-sub">La próxima búsqueda utilizará ${backendSelect.value === "pullpush" ? "PullPush" : "Arctic Shift"}</div>
+        </div>`;
+      document.getElementById("btnPrev").disabled = true;
+      document.getElementById("btnNext").disabled = true;
+      document.getElementById("pageBadge").style.display = "none";
+      document.getElementById("btnGuardarMarcador").style.display = "none";
     });
     actualizarContadorMarcadores();
     document.getElementById("ripCancelBtn").addEventListener("click", () => { ripCancelled = true; });
@@ -1394,7 +1470,9 @@
     const sort     = document.getElementById("sort").value;
     const minScore = parseInt(document.getElementById("minScore").value) || 0;
     const limit    = obtenerLimiteConfigurado();
-    const expectedMax = obtenerMaximoEsperado(limit);
+    const backend = obtenerBackend();
+    const requestLimit = obtenerLimiteBackend(limit, backend);
+    const expectedMax = obtenerMaximoEsperado(requestLimit);
     const gallery  = document.getElementById("gallery");
 
     if (!sub && !user) return;
@@ -1408,17 +1486,13 @@
 
     document.getElementById("mainScroll").scrollTo(0, 0);
 
-    let url = `https://arctic-shift.photon-reddit.com/api/posts/search?limit=${limit}&sort=${sort}`;
-    if (sub)  url += `&subreddit=${sub}`;
-    if (user) url += `&author=${user}`;
-    if (currentTS !== null)
-      url += sort === "asc" ? `&after=${currentTS}` : `&before=${currentTS}`;
+    const url = construirUrlBusqueda(backend, sub, user, sort, currentTS, limit);
 
     try {
       const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`Arctic Shift HTTP ${resp.status}`);
+      if (!resp.ok) throw new Error(`${backend === "pullpush" ? "PullPush" : "Arctic Shift"} HTTP ${resp.status}`);
       const res  = await resp.json();
-      if (!res || !Array.isArray(res.data)) throw new Error('Arctic Shift devolvió datos inesperados');
+      if (!res || !Array.isArray(res.data)) throw new Error(`${backend === "pullpush" ? "PullPush" : "Arctic Shift"} devolvió datos inesperados`);
       const posts = res.data;
 
       cerrarModalError();
@@ -1479,7 +1553,7 @@
           <div class="msg-sub">No se pudieron cargar los datos</div>
         </div>`;
       mostrarModalError(
-        'La API (Arctic Shift) no respondió. Tu lugar en la búsqueda no se perdió — podés reintentar.',
+        `La API (${backend === "pullpush" ? "PullPush" : "Arctic Shift"}) no respondió. Tu lugar en la búsqueda no se perdió — podés reintentar.`,
         () => ejecutarCarga(onSuccess, onFailureRollback)
       );
     }
@@ -1558,22 +1632,20 @@
     targets.push({ url: displayUrl, mediaType });
   }
 
-  async function collectRipTargets(sub, user, sort, minScore, limit, statusCb) {
+  async function collectRipTargets(sub, user, sort, minScore, limit, statusCb, backend) {
     const targets = [];
     let ts = null;
     let page = 0;
     let examined = 0;
     let scanIncomplete = false;
     let scanIncompleteReason = null;
-    const expectedMax = obtenerMaximoEsperado(limit);
+    const requestLimit = obtenerLimiteBackend(limit, backend);
+    const expectedMax = obtenerMaximoEsperado(requestLimit);
 
     while (!ripCancelled) {
       page++;
       statusCb(`Escaneando publicaciones… (página ${page}, ${targets.length} archivos encontrados, ${examined} publicaciones examinadas)`);
-      let url = `https://arctic-shift.photon-reddit.com/api/posts/search?limit=${limit}&sort=${sort}`;
-      if (sub)  url += `&subreddit=${sub}`;
-      if (user) url += `&author=${user}`;
-      if (ts !== null) url += sort === "asc" ? `&after=${ts}` : `&before=${ts}`;
+      const url = construirUrlBusqueda(backend, sub, user, sort, ts, limit);
 
       let posts = null;
       let lastErr = null;
@@ -1581,9 +1653,9 @@
       for (let attempt = 0; attempt < 3 && !posts; attempt++) {
         try {
           const resp = await fetch(url);
-          if (!resp.ok) throw new Error(`Arctic Shift HTTP ${resp.status}`);
+          if (!resp.ok) throw new Error(`${backend === "pullpush" ? "PullPush" : "Arctic Shift"} HTTP ${resp.status}`);
           const res = await resp.json();
-          if (!res || !Array.isArray(res.data)) throw new Error('Arctic Shift returned unexpected data');
+          if (!res || !Array.isArray(res.data)) throw new Error(`${backend === "pullpush" ? "PullPush" : "Arctic Shift"} returned unexpected data`);
           posts = res.data;
         } catch (e) {
           lastErr = e;
@@ -1701,6 +1773,7 @@
     const sort     = document.getElementById("sort").value;
     const minScore = parseInt(document.getElementById("minScore").value) || 0;
     const limit    = obtenerLimiteConfigurado();
+    const backend  = obtenerBackend();
 
     if (!sub && !user) {
       alert("Ingresá un subreddit o usuario primero.");
@@ -1737,7 +1810,7 @@
     logEl.classList.remove('show');
     overlay.classList.add('show');
 
-    const scanResult = await collectRipTargets(sub, user, sort, minScore, limit, msg => { statusEl.textContent = msg; });
+    const scanResult = await collectRipTargets(sub, user, sort, minScore, limit, msg => { statusEl.textContent = msg; }, backend);
     const targets = scanResult.targets;
     foundEl.textContent = targets.length;
 
