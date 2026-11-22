@@ -627,7 +627,8 @@
       overflow: hidden;
     }
 
-    .card img {
+    .card img,
+    .card video.card-video {
       width: 100%;
       height: auto;
       display: block;
@@ -637,7 +638,24 @@
       transition: transform 0.3s;
     }
 
-    .card:hover img { transform: scale(1.02); }
+    .card:hover img,
+    .card:hover video.card-video { transform: scale(1.02); }
+
+    .card-redgifs-iframe {
+      width: 100%;
+      aspect-ratio: 9 / 12;
+      border: 0;
+      display: block;
+      background: #0d0d0e;
+      pointer-events: none;
+    }
+
+    .card-click-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      cursor: zoom-in;
+    }
 
     .tag {
       position: absolute;
@@ -1439,7 +1457,7 @@
             }
           });
         } else if (
-          (post.url && post.url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) ||
+          (post.url && (post.url.match(/\.(jpg|jpeg|png|gif|webp)$/i) || post.url.toLowerCase().includes('redgifs.com'))) ||
           post.preview
         ) {
           renderCard(post);
@@ -1833,7 +1851,11 @@
       displayUrl = post.preview.images[0].source.url.replace(/&amp;/g, "&");
     }
 
-    if (esUrlPlaceholder(displayUrl)) return;
+    const postUrlLower = (post.url || '').toLowerCase();
+    const isRedgifsPost = postUrlLower.includes('redgifs.com');
+    const redgifsId = isRedgifsPost ? getRedgifsId(post.url) : null;
+
+    if (!redgifsId && esUrlPlaceholder(displayUrl)) return;
 
     // ── Media type detection ──
     const mediaType = getMediaType(post);
@@ -1885,10 +1907,30 @@
     if (esVideo)   typeTag = '<div class="tag tag-video">VIDEO</div>';
     if (esGaleria) typeTag = '<div class="tag tag-blue">GALERÍA</div>';
 
+    const redditGifPreviewMp4 = (
+      post.preview &&
+      post.preview.reddit_video_preview &&
+      post.preview.reddit_video_preview.fallback_url
+    ) ? post.preview.reddit_video_preview.fallback_url.replace(/&amp;/g, "&") : null;
+
+    let mediaElementHtml = `<img src="${displayUrl}" loading="lazy" class="img-clickable" alt="" />`;
+    if (redgifsId) {
+      const safePoster = (!esUrlPlaceholder(displayUrl) && displayUrl) ? `poster="${displayUrl}"` : '';
+      if (redditGifPreviewMp4) {
+        mediaElementHtml = `<video class="card-video img-clickable" src="${redditGifPreviewMp4}" ${safePoster} autoplay loop muted playsinline preload="metadata"></video>`;
+      } else {
+        mediaElementHtml = `
+          <div class="card-redgifs-box" style="position:relative;">
+            <iframe class="card-redgifs-iframe" src="https://www.redgifs.com/ifr/${redgifsId}?controls=0&autoplay=1&muted=1&loop=1" loading="lazy" frameborder="0" scrolling="no" allow="autoplay; encrypted-media"></iframe>
+            <div class="card-click-overlay img-clickable"></div>
+          </div>`;
+      }
+    }
+
     card.innerHTML = `
       <div class="card-img-wrap">
         ${typeTag}
-        <img src="${displayUrl}" loading="lazy" class="img-clickable" alt="" />
+        ${mediaElementHtml}
       </div>
       <div class="card-info">
         <div class="card-meta">
@@ -1904,9 +1946,30 @@
       </div>
     `;
 
-    verificarImagenEliminada(card.querySelector(".img-clickable"), card);
+    const clickableEl = card.querySelector(".img-clickable");
+    if (redgifsId && clickableEl.tagName === "VIDEO") {
+      clickableEl.onerror = () => {
+        const wrap = card.querySelector(".card-img-wrap");
+        if (!wrap) return;
+        clickableEl.remove();
+        const box = document.createElement("div");
+        box.className = "card-redgifs-box";
+        box.style.position = "relative";
+        box.innerHTML = `
+          <iframe class="card-redgifs-iframe" src="https://www.redgifs.com/ifr/${redgifsId}?controls=0&autoplay=1&muted=1&loop=1" loading="lazy" frameborder="0" scrolling="no" allow="autoplay; encrypted-media"></iframe>
+          <div class="card-click-overlay img-clickable"></div>
+        `;
+        wrap.appendChild(box);
+        box.querySelector(".img-clickable").onclick = () => abrirModal(modalUrl, fullRedditUrl, videoInfo);
+      };
+      cargarMp4RedgifsEnSegundoPlano(redgifsId, clickableEl);
+    } else if (redgifsId) {
+      cargarMp4RedgifsEnSegundoPlano(redgifsId, null, card, modalUrl, fullRedditUrl, videoInfo);
+    } else {
+      verificarImagenEliminada(clickableEl, card);
+    }
 
-    card.querySelector(".img-clickable").onclick = () => abrirModal(modalUrl, fullRedditUrl, videoInfo);
+    clickableEl.onclick = () => abrirModal(modalUrl, fullRedditUrl, videoInfo);
     card.querySelector(".user-link").onclick = () =>
       window.open(`${window.location.pathname}?user=${post.author}`, "_blank");
     card.querySelector(".sub-link").onclick = () =>
@@ -1925,6 +1988,73 @@
   function getRedgifsId(url) {
     const m = url.match(/redgifs\.com\/(?:watch|ifr)\/([a-zA-Z0-9]+)/i);
     return m ? m[1] : null;
+  }
+
+  let redgifsTokenPromise = null;
+  const redgifsMediaCache = new Map();
+
+  function obtenerTokenRedgifs() {
+    if (!redgifsTokenPromise) {
+      redgifsTokenPromise = fetch("https://api.redgifs.com/v2/auth/temporary")
+        .then(r => r.ok ? r.json() : null)
+        .then(data => (data && data.token) ? data.token : null)
+        .catch(() => null);
+    }
+    return redgifsTokenPromise;
+  }
+
+  async function obtenerMp4Redgifs(id) {
+    const key = id.toLowerCase();
+    if (redgifsMediaCache.has(key)) return redgifsMediaCache.get(key);
+    const p = (async () => {
+      try {
+        const token = await obtenerTokenRedgifs();
+        if (!token) return null;
+        const res = await fetch(`https://api.redgifs.com/v2/gifs/${encodeURIComponent(key)}`, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const urls = data && data.gif && data.gif.urls;
+        if (!urls) return null;
+        return {
+          mp4: urls.sd || urls.hd || null,
+          poster: urls.thumbnail || urls.poster || null
+        };
+      } catch (e) {
+        return null;
+      }
+    })();
+    redgifsMediaCache.set(key, p);
+    return p;
+  }
+
+  async function cargarMp4RedgifsEnSegundoPlano(redgifsId, videoEl, card, modalUrl, fullRedditUrl, videoInfo) {
+    const info = await obtenerMp4Redgifs(redgifsId);
+    if (!info || !info.mp4) return;
+    if (videoEl && videoEl.isConnected) {
+      if (!videoEl.src || videoEl.error) {
+        if (info.poster) videoEl.poster = info.poster;
+        videoEl.src = info.mp4;
+        videoEl.play().catch(() => {});
+      }
+      return;
+    }
+    if (card && card.isConnected) {
+      const box = card.querySelector(".card-redgifs-box");
+      if (!box) return;
+      const vid = document.createElement("video");
+      vid.className = "card-video img-clickable";
+      vid.src = info.mp4;
+      if (info.poster) vid.poster = info.poster;
+      vid.autoplay = true;
+      vid.loop = true;
+      vid.muted = true;
+      vid.playsInline = true;
+      vid.preload = "metadata";
+      vid.onclick = () => abrirModal(modalUrl, fullRedditUrl, videoInfo);
+      box.replaceWith(vid);
+    }
   }
 
   let currentHls = null;
